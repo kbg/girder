@@ -1,7 +1,7 @@
-version: 2
+version: 2.1
 
-jobs:
-  py2_serverInstall_serverTest:
+executors:
+  py2:
     docker:
       # This image uses the oldest version of many dependencies
       - image: girder/girder_test:latest-py2
@@ -12,20 +12,43 @@ jobs:
         # storage engine. We can pass alternate options to "mongod" by overwriting the default "CMD"
         # used to start the Docker image: https://github.com/circleci/circleci-images/blob/master/mongo/resources/Dockerfile-ram.template
         command: ["mongod", "--storageEngine", "ephemeralForTest", "--dbpath", "/dev/shm/mongo"]
-
+    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
+  py3:
+    docker:
+      # This image uses the newest version of many dependencies
+      - image: girder/girder_test:latest-py3
+      # Use the latest MongoDB
+      - image: circleci/mongo:3.6-ram
+        command: ["mongod", "--storageEngine", "ephemeralForTest", "--dbpath", "/dev/shm/mongo"]
+    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
+  machine:
+    machine: true
     working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
 
+commands:
+  install_girder:
+    parameters:
+      python3:
+        description: Whether Python3 is used for installation
+        type: boolean
     steps:
-      - checkout:
-          path: girder
       - run:
           name: Generate python environment checksum file
           command: ./girder/.circleci/generatePyEnvChecksum.sh > girder/py-env-checksum
       - restore_cache:
-          key: venv-py2-{{ arch }}-{{ checksum "girder/py-env-checksum" }}
-      - run:
-          name: Create virtual environment (if necessary)
-          command: if [ ! -d girder_env ]; then virtualenv girder_env; fi
+          key: venv-py<< parameters.python3 >>-{{ arch }}-{{ checksum "girder/py-env-checksum" }}
+      - unless:
+          condition: << parameters.python3 >>
+          steps:
+            - run:
+                name: Create virtual environment (if necessary)
+                command: if [ ! -d girder_env ]; then virtualenv girder_env; fi
+      - when:
+          condition: << parameters.python3 >>
+          steps:
+            - run:
+                name: Create virtual environment (if necessary)
+                command: if [ ! -d girder_env ]; then python3 -m venv girder_env; fi
       - run:
           name: Activate virtual environment
           command: echo ". $CIRCLE_WORKING_DIRECTORY/girder_env/bin/activate" >> $BASH_ENV
@@ -38,9 +61,23 @@ jobs:
           # Until https://github.com/pypa/pip/pull/4208 is available in pip 10, the install of
           # "requirements-dev.txt" must be run from the "girder" working directory
           working_directory: girder
+      - run:
+          name: Reduce workspace size
+          command: |
+            pyclean girder
+            pyclean girder_env
       - save_cache:
           paths: girder_env
-          key: venv-py2-{{ arch }}-{{ checksum "girder/py-env-checksum" }}
+          key: venv-py<< parameters.python3 >>-{{ arch }}-{{ checksum "girder/py-env-checksum" }}
+
+jobs:
+  py2_serverInstall_serverTest:
+    executor: py2
+    steps:
+      - checkout:
+          path: girder
+      - install_girder:
+          python3: false
       - run:
           name: Create Girder build directory
           command: mkdir girder_build
@@ -73,41 +110,12 @@ jobs:
             - girder_build
 
   py3_serverInstall:
-    docker:
-      # This image uses the newest version of many dependencies
-      - image: girder/girder_test:latest-py3
-
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
-
+    executor: py3
     steps:
       - checkout:
           path: girder
-      - run:
-          name: Generate python environment checksum file
-          command: ./girder/.circleci/generatePyEnvChecksum.sh > girder/py-env-checksum
-      - restore_cache:
-          key: venv-py3.5-{{ arch }}-{{ checksum "girder/py-env-checksum" }}
-      - run:
-          name: Create virtual environment (if necessary)
-          command: if [ ! -d girder_env ]; then python3 -m venv girder_env; fi
-      - run:
-          name: Activate virtual environment
-          command: echo ". $CIRCLE_WORKING_DIRECTORY/girder_env/bin/activate" >> $BASH_ENV
-      - run:
-          name: Upgrade Python toolchain
-          command: pip install --upgrade pip setuptools
-      - run:
-          name: Install Girder
-          command: pip install --upgrade --upgrade-strategy eager --editable .[sftp,mount] --editable clients/python --requirement requirements-dev.txt
-          working_directory: girder
-      - run:
-          name: Reduce workspace size
-          command: |
-            pyclean girder
-            pyclean girder_env
-      - save_cache:
-          paths: girder_env
-          key: venv-py3.5-{{ arch }}-{{ checksum "girder/py-env-checksum" }}
+      - install_girder:
+          python3: true
       - persist_to_workspace:
           root: /home/circleci/project
           paths:
@@ -115,14 +123,7 @@ jobs:
             - girder_env
 
   py3_serverTest:
-    docker:
-      - image: girder/girder_test:latest-py3
-      # Use the latest MongoDB
-      - image: circleci/mongo:3.6-ram
-        command: ["mongod", "--storageEngine", "ephemeralForTest", "--dbpath", "/dev/shm/mongo"]
-
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
-
+    executor: py3
     steps:
       - attach_workspace:
           at: /home/circleci/project
@@ -153,13 +154,7 @@ jobs:
             - girder
 
   py3_webBuild_webTest:
-    docker:
-      - image: girder/girder_test:latest-py3
-      - image: circleci/mongo:3.6-ram
-        command: ["mongod", "--storageEngine", "ephemeralForTest", "--dbpath", "/dev/shm/mongo"]
-
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
-
+    executor: py3
     steps:
       - attach_workspace:
           at: /home/circleci/project
@@ -218,9 +213,7 @@ jobs:
             - girder_env
 
   py2_integrationTests:
-    machine: true
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
-
+    executor: machine
     steps:
       - checkout:
           path: girder
@@ -304,11 +297,7 @@ jobs:
             - girder/build/test/coverage
 
   py2_coverage:
-    docker:
-      - image: girder/girder_test:latest-py2
-      - image: circleci/mongo:3.4-ram
-        command: ["mongod", "--storageEngine", "ephemeralForTest", "--dbpath", "/dev/shm/mongo"]
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
+    executor: py2
     steps:
       - attach_workspace:
           at: /home/circleci/project
@@ -336,9 +325,7 @@ jobs:
           command: codecov --disable search pycov gcov --root girder --file girder/build/test/coverage/py_coverage.xml
 
   py3_integrationTests:
-    machine: true
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
-
+    executor: machine
     steps:
       - checkout:
           path: girder
@@ -434,11 +421,7 @@ jobs:
             - girder/build/test/coverage
 
   py3_coverage:
-    docker:
-      - image: girder/girder_test:latest-py3
-      - image: circleci/mongo:3.6-ram
-        command: ["mongod", "--storageEngine", "ephemeralForTest", "--dbpath", "/dev/shm/mongo"]
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
+    executor: py3
     steps:
       - attach_workspace:
           at: /home/circleci/project
@@ -472,9 +455,7 @@ jobs:
           command: codecov --disable search pycov gcov --root girder --file girder/build/test/coverage/py_coverage.xml girder/build/test/coverage/cobertura-coverage.xml
 
   public_symbols:
-    docker:
-      - image: girder/girder_test:latest-py3
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
+    executor: py3
     steps:
       - checkout:
           path: girder
@@ -514,9 +495,7 @@ jobs:
           working_directory: girder
 
   deploy:
-    docker:
-      - image: girder/girder_test:latest-py3
-    working_directory: /home/circleci/project # as $CIRCLE_WORKING_DIRECTORY
+    executor: py3
     steps:
       # This step depends on both "py2_coverage" and "py3_coverage", as it should only run when
       # everything succeeds. However, this means that "attach_workspace" cannot be used, as the
